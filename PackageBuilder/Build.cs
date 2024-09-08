@@ -392,18 +392,19 @@ namespace VRC.PackageManagement.Automation
                     if (!Directory.Exists(WebPageSourcePath / WebPageDownloadsFolder))
                         Directory.CreateDirectory(WebPageSourcePath / WebPageDownloadsFolder);
 
-                    var rewrittenFilePath = WebPageSourcePath / WebPageDownloadsFolder / rewrittenFileName;
 
-                    await using var rewrittenFile = File.Create(rewrittenFilePath, 4096);
-                    manifest.zipSHA256 = await RewriteZipFileWithRootFolder(bytes, needsRepackagingOfRootFolder, rewrittenFile);
+                    await using var memoryStream = new MemoryStream();
+                    RewriteZipFileWithRootFolder(bytes, needsRepackagingOfRootFolder, memoryStream);
+                    bytes = memoryStream.ToArray();
+
+                    var rewrittenFilePath = WebPageSourcePath / WebPageDownloadsFolder / rewrittenFileName;
+                    await File.WriteAllBytesAsync(rewrittenFilePath, bytes);
 
                     Serilog.Log.Information($"Rewritten as '{rewrittenFileName}' to '{url}'!");
                 }
-                else
-                {
-                    var hash = GetHashForBytes(bytes);
-                    manifest.zipSHA256 = hash;
-                }
+
+                manifest.zipSHA256 = GetHashForBytes(bytes);
+                Serilog.Log.Information($"Assigned '{url}' hash '{manifest.zipSHA256}'");
 
                 // Workaround for bug of vpm-resolver
                 // see: https://github.com/vrchat-community/creator-companion/issues/226
@@ -448,11 +449,9 @@ namespace VRC.PackageManagement.Automation
             return ret;
         }
 
-        static async Task<string> RewriteZipFileWithRootFolder(byte[] input, string rootFolder, Stream output)
+        static byte[] rewriteBuffer = new byte[4096];
+        static void RewriteZipFileWithRootFolder(byte[] input, string rootFolder, Stream output)
         {
-            byte[] rewriteBuffer = new byte[4096];
-
-            using (var sha256 = IncrementalHash.CreateHash(HashAlgorithmName.SHA256))
             using (var stream = new MemoryStream(input))
             using (ZipFile zf = new ZipFile(stream))
             using (var zipOut = new ZipOutputStream(output))
@@ -480,17 +479,9 @@ namespace VRC.PackageManagement.Automation
                     };
                     zipOut.PutNextEntry(newEntry);
                     using (var sourceStream = zf.GetInputStream(entry))
-                    {
-                        int count;
-                        while ((count = await sourceStream.ReadAsync(rewriteBuffer)) > 0)
-                        {
-                            zipOut.Write(rewriteBuffer, 0, count);
-                            sha256.AppendData(rewriteBuffer, 0, count);
-                        }
-                    }
+                        ICSharpCode.SharpZipLib.Core.StreamUtils.Copy(sourceStream, zipOut, rewriteBuffer);
                     zipOut.CloseEntry();
                 }
-                return string.Concat(sha256.GetCurrentHash().Select(item => item.ToString("x2")));
             }
         }
 
