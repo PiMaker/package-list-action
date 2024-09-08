@@ -394,11 +394,8 @@ namespace VRC.PackageManagement.Automation
 
                     var rewrittenFilePath = WebPageSourcePath / WebPageDownloadsFolder / rewrittenFileName;
 
-                    await using var rewrittenFile = File.Create(rewrittenFilePath);
-                    RewriteZipFileWithRootFolder(bytes, needsRepackagingOfRootFolder, rewrittenFile);
-
-                    var hash = GetHashForBytes(await File.ReadAllBytesAsync(rewrittenFilePath));
-                    manifest.zipSHA256 = hash;
+                    await using var rewrittenFile = File.Create(rewrittenFilePath, 4096);
+                    manifest.zipSHA256 = await RewriteZipFileWithRootFolder(bytes, needsRepackagingOfRootFolder, rewrittenFile);
 
                     Serilog.Log.Information($"Rewritten as '{rewrittenFileName}' to '{url}'!");
                 }
@@ -451,9 +448,11 @@ namespace VRC.PackageManagement.Automation
             return ret;
         }
 
-        static byte[] rewriteBuffer = new byte[4096];
-        static void RewriteZipFileWithRootFolder(byte[] input, string rootFolder, Stream output)
+        static async Task<string> RewriteZipFileWithRootFolder(byte[] input, string rootFolder, Stream output)
         {
+            byte[] rewriteBuffer = new byte[4096];
+
+            using (var sha256 = IncrementalHash.CreateHash(HashAlgorithmName.SHA256))
             using (var stream = new MemoryStream(input))
             using (ZipFile zf = new ZipFile(stream))
             using (var zipOut = new ZipOutputStream(output))
@@ -481,9 +480,17 @@ namespace VRC.PackageManagement.Automation
                     };
                     zipOut.PutNextEntry(newEntry);
                     using (var sourceStream = zf.GetInputStream(entry))
-                        ICSharpCode.SharpZipLib.Core.StreamUtils.Copy(sourceStream, zipOut, rewriteBuffer);
+                    {
+                        int count;
+                        while ((count = await sourceStream.ReadAsync(rewriteBuffer)) > 0)
+                        {
+                            zipOut.Write(rewriteBuffer, 0, count);
+                            sha256.AppendData(rewriteBuffer, 0, count);
+                        }
+                    }
                     zipOut.CloseEntry();
                 }
+                return string.Concat(sha256.GetCurrentHash().Select(item => item.ToString("x2")));
             }
         }
 
